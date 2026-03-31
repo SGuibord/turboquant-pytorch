@@ -2,28 +2,34 @@
 
 A from-scratch PyTorch implementation of [TurboQuant](https://arxiv.org/abs/2504.19874) (ICLR 2026), Google's vector quantization algorithm for compressing LLM key-value caches. Tested on Windows with NVIDIA GPUs.
 
-We implemented the paper's algorithm, found that its key innovation (QJL) actually hurts in practice, and built an improved version (V3) informed by findings from 8+ independent community implementations. **V3 achieves 5x compression with 18/18 perfect text generation** on Qwen2.5-3B-Instruct.
+We implemented the paper's algorithm, found that its key innovation (QJL) actually hurts in practice, and built an improved version (V3) informed by findings from 8+ independent community implementations.
+
+> **Correction (2026-03-30):** An earlier version of this README claimed "18/18 perfect generation at 5x compression." This was based on a [bugged test](https://github.com/tonbistudio/turboquant-pytorch/issues/14) where `residual_window=0` caused no compression to happen. The corrected results are below. Credit to [@barbel-bb](https://github.com/barbel-bb) for finding the bug.
 
 ## Results
 
 ### V3: Generation Test (the real test — does the model produce correct text?)
 
-We hid a fact ("The secret project code name is AURORA-7749") in a long document and asked the model to find it:
+We hid a fact ("The secret project code name is AURORA-7749") in a long document and asked the model to find it. Results with **actual compression verified** (compressed token counts logged):
 
-| Config | Avg Bits | Compression | 2K ctx | 4K ctx | 8K ctx |
-|--------|---------|------------|--------|--------|--------|
-| FP16 (baseline) | 16 | 1.0x | FOUND | FOUND | FOUND |
-| **V3 K4/V2** | **3.0** | **5.1x** | **FOUND** | **FOUND** | **FOUND** |
-| V3 K4/V3 | 3.5 | 3.8x | FOUND | FOUND | FOUND |
-| V3 K4/V4 | 4.0 | 3.4x | FOUND | FOUND | FOUND |
-| V3 K3/V2 | 2.5 | 6.0x | FOUND | FOUND | FOUND |
-| V3 K3/V3 | 3.0 | 4.6x | FOUND | FOUND | FOUND |
+| Config | 2K ctx | 4K ctx | Compression (2K) |
+|--------|--------|--------|-----------------|
+| FP16 (baseline) | EXACT | EXACT | 1.0x |
+| **K6/V4 rw=128** | **EXACT** | **EXACT** | **~2x** |
+| **K8/V4 rw=128** | **EXACT** | **EXACT** | **~1.6x** |
+| K4/V4 rw=128 | PARTIAL ("AURORA7749") | MISS | ~3x |
+| K4/V4 rw=0 | MISS | MISS | ~3.4x |
+| K4/V2 rw=0 | MISS | MISS | ~5x |
 
-**18/18 perfect retrieval.** Every config, every context length.
+"EXACT" = output contains "AURORA-7749". "PARTIAL" = contains both "AURORA" and "7749" but not the exact string. "rw" = residual window (recent tokens kept in fp16).
 
-For comparison, V2 (with QJL from the paper) scored **0/27** — total garbage output at every config.
+**What works:** K6/V4 with a 128-token fp16 window gives ~2x real compression with perfect output at both context lengths. At 4-bit keys, the model finds the needle at short context but garbles it slightly (drops the hyphen). At 3-bit keys, generation is broken.
+
+**What doesn't work:** 3-4 bit compression without a residual window produces garbage, same as V2. High attention score similarity (99.5%+) does not guarantee working generation.
 
 ### V3: Attention Score Accuracy (8K context)
+
+These results are valid — they test compression directly on captured KV tensors, not through V3Cache:
 
 | Config | Compression | Cosine Similarity | Top-1 Match | Top-5 Match |
 |--------|-----------|------------------|-------------|-------------|
@@ -32,17 +38,7 @@ For comparison, V2 (with QJL from the paper) scored **0/27** — total garbage o
 | V2 3-bit (MSE+QJL) | 5.0x | 0.9945 | 86% | 94% |
 | V2 4-bit (MSE+QJL) | 3.8x | 0.9983 | 86% | 96% |
 
-V3 gets better compression AND better accuracy than V2 by removing QJL.
-
-### Compression
-
-| Config | KV Cache Size (8K ctx) | Compression |
-|--------|----------------------|-------------|
-| FP16 (baseline) | 289 MB | 1.0x |
-| V3 K4/V2 | 57 MB | **5.1x** |
-| V3 K3/V2 | 48 MB | **6.0x** |
-
-On a 12GB RTX 3060, 5x compression means fitting ~40K context instead of ~8K.
+V3 gets better attention score accuracy than V2 by removing QJL. However, high attention scores alone do not guarantee working text generation (see above).
 
 ## What Is K4/V2?
 
